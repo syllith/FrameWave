@@ -30,66 +30,6 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// CustomImage widget
-type CustomImage struct {
-	widget.BaseWidget // embed the base widget to handle common behaviors
-
-	Image       *canvas.Image
-	FillMode    canvas.ImageFill
-	FixedWidth  float32
-	FixedHeight float32
-}
-
-// NewCustomImage creates a new custom image widget and initializes it
-func NewCustomImage(res fyne.Resource) *CustomImage {
-	c := &CustomImage{}
-	c.ExtendBaseWidget(c) // make sure we have an initialized BaseWidget
-	c.Image = canvas.NewImageFromResource(res)
-	return c
-}
-
-func (c *CustomImage) MinSize() fyne.Size {
-	if c.FixedWidth > 0 && c.FixedHeight > 0 {
-		return fyne.NewSize(c.FixedWidth, c.FixedHeight)
-	}
-	return c.Image.MinSize()
-}
-
-func (c *CustomImage) CreateRenderer() fyne.WidgetRenderer {
-	return &customImageRenderer{image: c, objects: []fyne.CanvasObject{c.Image}}
-}
-
-// Renderer for the CustomImage widget
-type customImageRenderer struct {
-	image   *CustomImage
-	objects []fyne.CanvasObject
-}
-
-func (cir *customImageRenderer) Layout(size fyne.Size) {
-	cir.image.Image.Resize(size)
-}
-
-func (cir *customImageRenderer) MinSize() fyne.Size {
-	return cir.image.MinSize()
-}
-
-func (cir *customImageRenderer) Refresh() {
-	cir.image.Image.Refresh()
-}
-
-func (cir *customImageRenderer) Objects() []fyne.CanvasObject {
-	return cir.objects
-}
-
-func (cir *customImageRenderer) Destroy() {
-	// This can be left empty if there's nothing specific to clean up.
-}
-
-func (c *CustomImage) SetResource(res fyne.Resource) {
-	c.Image.Resource = res
-	c.Image.Refresh()
-}
-
 // * Backend
 var stream chan []byte
 var server *http.Server
@@ -123,7 +63,7 @@ var mainView = container.NewPadded(
 )
 
 // * Elements
-var streamImg = &CustomImage{
+var streamImg = &fynecustom.CustomImage{
 	FixedWidth:  320,
 	FixedHeight: 180,
 	Image:       &canvas.Image{FillMode: canvas.ImageFillStretch},
@@ -293,6 +233,7 @@ func serveMjpeg(w http.ResponseWriter, r *http.Request) {
 // . Start streaming
 func startStreaming() {
 	toggleButton.SetText("Stop")
+	streamImg.Show()
 
 	host := "0.0.0.0:" + portEntry.Text
 	stopChan = make(chan bool)
@@ -314,6 +255,7 @@ func startStreaming() {
 // . Stop streaming
 func stopStreaming() {
 	toggleButton.SetText("Start")
+	streamImg.Hide()
 	currentFpsLabel.Text = "FPS: N/A"
 	currentFpsLabel.Color = colormap.OffWhite
 	currentFpsLabel.Refresh()

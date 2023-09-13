@@ -59,24 +59,19 @@ func RoamingDir() string {
 	return roaming
 }
 
-func CreateFfmpeg() (string, error) {
+func CreateFfmpeg() {
 	framewavePath := filepath.Join(RoamingDir(), "FrameWave")
 
 	// Check if framewave directory exists, create if not
 	if _, err := os.Stat(framewavePath); os.IsNotExist(err) {
 		if err := os.Mkdir(framewavePath, 0755); err != nil {
-			return "", err
+			return
 		}
 	}
 
 	ffmpegPath := filepath.Join(framewavePath, "ffmpeg.exe")
 	if _, err := os.Stat(ffmpegPath); os.IsNotExist(err) {
 		// Only write the file if it doesn't exist already
-		err = os.WriteFile(ffmpegPath, ffmpegEXE, 0755)
-		if err != nil {
-			return "", err
-		}
+		_ = os.WriteFile(ffmpegPath, ffmpegEXE, 0755)
 	}
-
-	return ffmpegPath, nil
 }

@@ -4,6 +4,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 )
 
 // * Custom form
@@ -99,4 +100,64 @@ func (f *MinWidthFormLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 		added = true
 	}
 	return minSize
+}
+
+// CustomImage widget
+type CustomImage struct {
+	widget.BaseWidget // embed the base widget to handle common behaviors
+
+	Image       *canvas.Image
+	FillMode    canvas.ImageFill
+	FixedWidth  float32
+	FixedHeight float32
+}
+
+// NewCustomImage creates a new custom image widget and initializes it
+func NewCustomImage(res fyne.Resource) *CustomImage {
+	c := &CustomImage{}
+	c.ExtendBaseWidget(c) // make sure we have an initialized BaseWidget
+	c.Image = canvas.NewImageFromResource(res)
+	return c
+}
+
+func (c *CustomImage) MinSize() fyne.Size {
+	if c.FixedWidth > 0 && c.FixedHeight > 0 {
+		return fyne.NewSize(c.FixedWidth, c.FixedHeight)
+	}
+	return c.Image.MinSize()
+}
+
+func (c *CustomImage) CreateRenderer() fyne.WidgetRenderer {
+	return &customImageRenderer{image: c, objects: []fyne.CanvasObject{c.Image}}
+}
+
+// Renderer for the CustomImage widget
+type customImageRenderer struct {
+	image   *CustomImage
+	objects []fyne.CanvasObject
+}
+
+func (cir *customImageRenderer) Layout(size fyne.Size) {
+	cir.image.Image.Resize(size)
+}
+
+func (cir *customImageRenderer) MinSize() fyne.Size {
+	return cir.image.MinSize()
+}
+
+func (cir *customImageRenderer) Refresh() {
+	cir.image.Image.Refresh()
+}
+
+func (cir *customImageRenderer) Objects() []fyne.CanvasObject {
+	return cir.objects
+}
+
+func (cir *customImageRenderer) Destroy() {
+	// This can be left empty if there's nothing specific to clean up.
+}
+
+func (c *CustomImage) SetResource(res fyne.Resource) {
+	c.Image.Resource = res
+	c.Image.Refresh()
 }

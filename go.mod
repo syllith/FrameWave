@@ -2,11 +2,7 @@ module framewave
 
 go 1.21.0
 
-require (
-	fyne.io/fyne/v2 v2.4.0
-	github.com/hybridgroup/mjpeg v0.0.0-20140228234708-4680f319790e
-	gocv.io/x/gocv v0.34.0
-)
+require fyne.io/fyne/v2 v2.4.0
 
 require (
 	fyne.io/systray v1.10.1-0.20230722100817-88df1e0ffa9a // indirect
