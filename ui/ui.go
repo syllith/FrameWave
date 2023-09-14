@@ -15,7 +15,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
-	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -42,15 +41,15 @@ type CameraSettings struct {
 	MaxFPS     int
 }
 
-var stream chan []byte
-var server *http.Server
+var streams map[string]chan []byte
+var servers map[string]*http.Server
 var stopChan chan bool
-var ffmpegCmd *exec.Cmd
+var ffmpegCmds map[string]*exec.Cmd
 var ffmpegPath = filepath.Join(general.RoamingDir(), "FrameWave", "ffmpeg.exe")
 var cameras []CameraSettings
 
 // * Main view
-var mainView = container.NewBorder(nil, toggleButton, nil, nil, getTabs())
+var mainView = container.NewBorder(streamImg, toggleButton, nil, nil, getTabs())
 
 // * Elements
 var streamImg = &fynecustom.CustomImage{
@@ -71,11 +70,13 @@ var currentFpsLabel = &canvas.Text{
 
 // . Initalization
 func Init() {
-	//. Create stream buffer
-	stream = make(chan []byte, 100)
+	streams = make(map[string]chan []byte)
+	servers = make(map[string]*http.Server)
+	ffmpegCmds = make(map[string]*exec.Cmd)
 
-	//. Create stream handle
-	http.HandleFunc("/", serveMjpeg)
+	for _, camera := range cameras {
+		streams[camera.Name] = make(chan []byte, 100)
+	}
 
 	//. Set window properties
 	globals.Win.SetContent(mainView)
@@ -87,7 +88,7 @@ func Init() {
 }
 
 // . Server MJPEG stream
-func serveMjpeg(w http.ResponseWriter, r *http.Request) {
+func serveMjpeg(cameraName string, w http.ResponseWriter, r *http.Request) {
 	const boundary = "frame"
 
 	//* Create response writer
@@ -105,7 +106,7 @@ func serveMjpeg(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			//! Client disconnected
 			return
-		case jpeg, ok := <-stream:
+		case jpeg, ok := <-streams[cameraName]:
 			if !ok || jpeg == nil {
 				//! Failed to send jpeg to stream
 				return
@@ -127,25 +128,28 @@ func serveMjpeg(w http.ResponseWriter, r *http.Request) {
 // . Start streaming
 func startStreaming() {
 	toggleButton.SetText("Stop")
+	stopChan = make(chan bool)
 
-	// loop through each port
 	for _, camera := range cameras {
 		if camera.Enabled {
-			host := "0.0.0.0:" + camera.Port
-			stopChan = make(chan bool)
-			go mjpegCapture(camera)
-
-			if server == nil {
-				//* Create server
-				server = &http.Server{Addr: host}
-				go func() {
-					//* Listen and serve
-					if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-						//! Failed to start server
+			if _, ok := servers[camera.Name]; !ok {
+				mux := http.NewServeMux()
+				cameraName := camera.Name
+				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+					serveMjpeg(cameraName, w, r)
+				})
+				server := &http.Server{
+					Addr:    "0.0.0.0:" + camera.Port,
+					Handler: mux,
+				}
+				servers[camera.Name] = server
+				go func(serv *http.Server) {
+					if err := serv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 						log.Println("Failed to start server:", err)
 					}
-				}()
+				}(server)
 			}
+			go mjpegCapture(camera)
 		}
 	}
 }
@@ -159,40 +163,31 @@ func stopStreaming() {
 	currentFpsLabel.Refresh()
 
 	go func() {
-		//* Signal stop channel
-		if stopChan != nil {
-			stopChan <- true
-			close(stopChan)
-			stopChan = nil
-			for len(stream) > 0 {
-				<-stream
-			}
+		stopChan <- true
+		close(stopChan)
+		stopChan = nil
+
+		for _, cmd := range ffmpegCmds {
+			cmd.Process.Kill()
 		}
+		ffmpegCmds = make(map[string]*exec.Cmd)
 
-		//* Stop FFmpeg process
-		if ffmpegCmd != nil && ffmpegCmd.Process != nil {
-			ffmpegCmd.Process.Signal(os.Interrupt)
-
-			if ffmpegCmd.ProcessState == nil || !ffmpegCmd.ProcessState.Exited() {
-				ffmpegCmd.Process.Kill()
-			}
-
-			ffmpegCmd = nil
-		}
-
-		//* Shutdown the HTTP server
-		if server != nil {
+		for key, serv := range servers {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			server.Shutdown(ctx)
-			server = nil
+			serv.Shutdown(ctx)
+			cancel()
+			delete(servers, key)
 		}
 	}()
 }
 
 // . FFMPEG Capture
 func mjpegCapture(camera CameraSettings) {
-	fmt.Println(camera.Name, camera.Res, camera.FPS, camera.Quality, camera.Port, camera.BufferSize)
+	if _, exists := streams[camera.Name]; !exists {
+		streams[camera.Name] = make(chan []byte, 100)
+	}
+	stream := streams[camera.Name]
+
 	//* Configure FFMPEG
 	ffmpegArgs := []string{
 		"-f", "dshow",
@@ -209,22 +204,21 @@ func mjpegCapture(camera CameraSettings) {
 	}
 
 	//* Build command
-	ffmpegCmd = exec.Command(ffmpegPath, ffmpegArgs...)
+	cmd := exec.Command(ffmpegPath, ffmpegArgs...)
+	ffmpegCmds[camera.Name] = cmd
 
-	ffmpegCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	stderrReader, stderrWriter := io.Pipe()
-	ffmpegCmd.Stderr = stderrWriter
-	ffmpegOut, err := ffmpegCmd.StdoutPipe()
+	cmd.Stderr = stderrWriter
+	ffmpegOut, err := cmd.StdoutPipe()
 	if err != nil {
-		//! Error setting up stdout pipe
-		log.Println("Error setting up stdout pipe:", err)
+		log.Println("Error setting up stdout pipe for", camera.Name, ":", err)
 		return
 	}
 
-	//* Start FFMPEG
-	if err := ffmpegCmd.Start(); err != nil {
-		//! Failed to start FFMPEG
-		log.Println("Failed to start FFMPEG:", err)
+	//* Start FFMPEG for the specific camera
+	if err := cmd.Start(); err != nil {
+		log.Println("Failed to start FFMPEG for", camera.Name, ":", err)
 		return
 	}
 
@@ -415,16 +409,34 @@ func getCameraResolutions(deviceName string) []string {
 	return resolutions
 }
 
-func genCameraContainer(cameraName string) *fyne.Container {
+// . Generate app tabs for each camera
+func getTabs() *container.AppTabs {
+	tabs := container.NewAppTabs()
+	tabs.SetTabLocation(container.TabLocationLeading)
+	names := getCameraNames()
+
+	for _, name := range names {
+		cameras = append(cameras, CameraSettings{Name: name})
+		tabs.Append(container.NewTabItem(name, genConfigContainer(name)))
+	}
+
+	return tabs
+}
+
+// . Generate configuration container for a camera
+func genConfigContainer(cameraName string) *fyne.Container {
+	var index int
+	for i, cam := range cameras {
+		if cam.Name == cameraName {
+			index = i
+			break
+		}
+	}
+
 	//. Create enabled checkbox
 	enabledCheck := &widget.Check{
 		OnChanged: func(checked bool) {
-			for i, cam := range cameras {
-				if cam.Name == cameraName {
-					cameras[i].Enabled = checked
-					break
-				}
-			}
+			cameras[index].Enabled = checked
 		},
 	}
 
@@ -433,24 +445,22 @@ func genCameraContainer(cameraName string) *fyne.Container {
 		PlaceHolder: "Resolution",
 		Options:     getCameraResolutions(cameraName),
 		OnChanged: func(selected string) {
-			for i, cam := range cameras {
-				if cam.Name == cameraName {
-					cameras[i].Res = selected
+			cameras[index].Res = selected
 
-					re := regexp.MustCompile(`(\d+)x(\d+)`)
-					matches := re.FindStringSubmatch(selected)
+			re := regexp.MustCompile(`(\d+)x(\d+)`)
+			matches := re.FindStringSubmatch(selected)
 
-					width, _ := strconv.Atoi(matches[1])
-					height, _ := strconv.Atoi(matches[2])
+			width, _ := strconv.Atoi(matches[1])
+			height, _ := strconv.Atoi(matches[2])
 
-					uncompressedSize := width * height * 24 / 8
-					estimatedJPEGSize := uncompressedSize / 10
-					cameras[i].BufferSize = estimatedJPEGSize + int(0.3*float64(estimatedJPEGSize))
-					break
-				}
-			}
+			uncompressedSize := width * height * 24 / 8
+			estimatedJPEGSize := uncompressedSize / 10
+			cameras[index].BufferSize = estimatedJPEGSize + int(0.3*float64(estimatedJPEGSize))
 		},
 	}
+
+	//. Set default resolutions
+	resSelect.SetSelected(resSelect.Options[0])
 
 	//. Create FPS slider and label
 	fpsSlider := &widget.Slider{
@@ -463,49 +473,38 @@ func genCameraContainer(cameraName string) *fyne.Container {
 		Text: fmt.Sprintf("FPS (%v)", int(fpsSlider.Value)),
 	}
 
+	//. Update FPS label on slider move
+	fpsSlider.OnChanged = func(f float64) {
+		fpsLabel.SetText(fmt.Sprintf("FPS (%v)", int(f)))
+		cameras[index].FPS = int(f)
+	}
+
 	//. Create quality slider
 	qualitySlider := &widget.Slider{
 		Min:   0,
 		Max:   100,
 		Value: 100,
 		OnChanged: func(f float64) {
-			for i, cam := range cameras {
-				if cam.Name == cameraName {
-					cameras[i].Quality = int(f)
-					break
-				}
-			}
+			cameras[index].Quality = int(f)
 		},
+	}
+
+	qualityLabel := &widget.Label{
+		Text: fmt.Sprintf("Quality (%v)", int(qualitySlider.Value)),
+	}
+
+	qualitySlider.OnChanged = func(f float64) {
+		qualityLabel.SetText(fmt.Sprintf("Quality (%v)", int(f)))
+		cameras[index].FPS = int(f)
 	}
 
 	//. Create port entry
 	portEntry := &widget.Entry{
 		PlaceHolder: "Enter Port",
-		Text:        "8080",
+		Text:        "808" + strconv.Itoa(len(cameras)-1),
 		OnChanged: func(text string) {
-			for i, cam := range cameras {
-				if cam.Name == cameraName {
-					cameras[i].Port = text
-					break
-				}
-			}
+			cameras[index].Port = text
 		},
-	}
-
-	//. Set default resolutions
-	if resSelect.Options != nil && len(resSelect.Options) > 0 {
-		resSelect.SetSelected(resSelect.Options[0])
-	}
-
-	//. Update FPS label on slider move
-	fpsSlider.OnChanged = func(f float64) {
-		fpsLabel.SetText(fmt.Sprintf("FPS (%v)", int(f)))
-		for i, cam := range cameras {
-			if cam.Name == cameraName {
-				cameras[i].FPS = int(f)
-				break
-			}
-		}
 	}
 
 	//. Toggle button tapped
@@ -518,6 +517,13 @@ func genCameraContainer(cameraName string) *fyne.Container {
 		toggleButton.Refresh()
 	}
 
+	//. Set default camera setting
+	cameras[len(cameras)-1].Res = resSelect.Options[0]
+	cameras[len(cameras)-1].FPS = int(fpsSlider.Value)
+	cameras[len(cameras)-1].Quality = int(qualitySlider.Value)
+	cameras[len(cameras)-1].Port = portEntry.Text
+	cameras[len(cameras)-1].Enabled = enabledCheck.Checked
+
 	// Return the VBox containing all these widgets for this camera.
 	return container.NewPadded(
 		container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 200},
@@ -527,24 +533,10 @@ func genCameraContainer(cameraName string) *fyne.Container {
 			resSelect,
 			fpsLabel,
 			fpsSlider,
-			&widget.Label{Text: "Quality"},
+			qualityLabel,
 			qualitySlider,
 			&widget.Label{Text: "Port"},
 			portEntry,
 		),
 	)
-}
-
-// Dynamic function to get the tabs based on available cameras
-func getTabs() *container.AppTabs {
-	tabs := container.NewAppTabs()
-	tabs.SetTabLocation(container.TabLocationLeading)
-	cameraNames := getCameraNames()
-
-	for _, name := range cameraNames {
-		cameras = append(cameras, CameraSettings{Name: name})
-		tabs.Append(container.NewTabItem(name, genCameraContainer(name)))
-	}
-
-	return tabs
 }
