@@ -36,7 +36,7 @@ type CameraSettings struct {
 	Res        string
 	FPS        int
 	Quality    int
-	Port       int
+	Port       string
 	Enabled    bool
 	BufferSize int
 	MaxFPS     int
@@ -49,7 +49,7 @@ var ffmpegCmd *exec.Cmd
 var ffmpegPath = filepath.Join(general.RoamingDir(), "FrameWave", "ffmpeg.exe")
 var cameras []CameraSettings
 
-// * Main viewd
+// * Main view
 var mainView = container.NewBorder(nil, toggleButton, nil, nil, getTabs())
 
 // * Elements
@@ -71,12 +71,6 @@ var currentFpsLabel = &canvas.Text{
 
 // . Initalization
 func Init() {
-	go func() {
-		for {
-			time.Sleep(3 * time.Second)
-			fmt.Println(cameras)
-		}
-	}()
 	//. Create stream buffer
 	stream = make(chan []byte, 100)
 
@@ -133,18 +127,21 @@ func serveMjpeg(w http.ResponseWriter, r *http.Request) {
 // . Start streaming
 func startStreaming() {
 	toggleButton.SetText("Stop")
-	streamImg.Show()
 
+	// loop through each port
 	for _, camera := range cameras {
 		if camera.Enabled {
-			host := "0.0.0.0:" + strconv.Itoa(camera.Port)
+			host := "0.0.0.0:" + camera.Port
+			stopChan = make(chan bool)
 			go mjpegCapture(camera)
 
 			if server == nil {
-				// Create server
+				//* Create server
 				server = &http.Server{Addr: host}
 				go func() {
+					//* Listen and serve
 					if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						//! Failed to start server
 						log.Println("Failed to start server:", err)
 					}
 				}()
@@ -195,21 +192,23 @@ func stopStreaming() {
 
 // . FFMPEG Capture
 func mjpegCapture(camera CameraSettings) {
+	fmt.Println(camera.Name, camera.Res, camera.FPS, camera.Quality, camera.Port, camera.BufferSize)
 	//* Configure FFMPEG
 	ffmpegArgs := []string{
 		"-f", "dshow",
-		"-i", fmt.Sprintf("video=%s", camera.Name),
-		"-vf", fmt.Sprintf("fps=%d", camera.FPS),
-		"-video_size", camera.Res,
-		"-bufsize", fmt.Sprintf("%d", camera.BufferSize),
+		"-rtbufsize", fmt.Sprintf("%d", camera.BufferSize),
+		"-probesize", "32",
+		"-analyzeduration", "0",
+		"-i", "video=" + camera.Name,
+		"-pix_fmt", "yuv420p",
+		"-color_range", "2",
+		"-vf", "scale=in_range=pc:out_range=pc,scale=" + camera.Res + fmt.Sprintf(",fps=%v", camera.FPS),
 		"-c:v", "mjpeg",
-		"-q:v", "5",
-		"-f", "mjpeg",
-		"-",
+		"-q:v", strconv.Itoa(100 - camera.Quality),
+		"-f", "mjpeg", "-",
 	}
 
 	//* Build command
-
 	ffmpegCmd = exec.Command(ffmpegPath, ffmpegArgs...)
 
 	ffmpegCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -229,7 +228,7 @@ func mjpegCapture(camera CameraSettings) {
 		return
 	}
 
-	//. Monitor FPS frpm stderr
+	//. Monitor FPS from stderr
 	go func() {
 		defer stderrReader.Close()
 		reFPS := regexp.MustCompile(`fps=\s*(\d+)`)
@@ -483,6 +482,14 @@ func genCameraContainer(cameraName string) *fyne.Container {
 	portEntry := &widget.Entry{
 		PlaceHolder: "Enter Port",
 		Text:        "8080",
+		OnChanged: func(text string) {
+			for i, cam := range cameras {
+				if cam.Name == cameraName {
+					cameras[i].Port = text
+					break
+				}
+			}
+		},
 	}
 
 	//. Set default resolutions
