@@ -216,19 +216,17 @@ func mjpegCapture(camera CameraSettings) {
 		streams[camera.Name] = make(chan []byte, 100)
 	}
 	stream := streams[camera.Name]
-
 	//* Configure FFMPEG
 	ffmpegArgs := []string{
 		"-f", "dshow",
 		"-rtbufsize", fmt.Sprintf("%d", camera.BufferSize),
 		"-probesize", "32",
-		"-analyzeduration", "0",
 		"-i", "video=" + camera.Name,
 		"-pix_fmt", "yuv420p",
 		"-color_range", "2",
 		"-vf", "scale=in_range=pc:out_range=pc,scale=" + camera.Res + fmt.Sprintf(",fps=%v", camera.FPS),
 		"-c:v", "mjpeg",
-		"-q:v", strconv.Itoa(camera.Quality),
+		"-q:v", strconv.Itoa(2 + (100-camera.Quality)*(31-2)/(100-1)),
 		"-f", "mjpeg", "-",
 	}
 
@@ -306,9 +304,19 @@ func mjpegCapture(camera CameraSettings) {
 
 	//. Process Frames
 	go func() {
+		var jpegPool = sync.Pool{
+			New: func() interface{} {
+				b := make([]byte, 0, camera.BufferSize)
+				return &b
+			},
+		}
+
 		//* Create JPEG read buffer
 		jpegEnd := []byte{0xFF, 0xD9}
-		buffer := make([]byte, 0, camera.BufferSize)
+		bufferPtr := jpegPool.Get().(*[]byte)
+		buffer := *bufferPtr
+		defer jpegPool.Put(bufferPtr)
+		buffer = buffer[:0]
 		readBuffer := make([]byte, camera.BufferSize)
 		for {
 			select {
@@ -534,7 +542,7 @@ func genConfigContainer(cameraName string) *fyne.Container {
 
 	//. Create FPS slider and label
 	fpsSlider := &widget.Slider{
-		Min:   1,
+		Min:   2,
 		Max:   30,
 		Value: 30,
 	}
@@ -551,12 +559,9 @@ func genConfigContainer(cameraName string) *fyne.Container {
 
 	//. Create quality slider
 	qualitySlider := &widget.Slider{
-		Min:   0,
+		Min:   1,
 		Max:   100,
 		Value: 100,
-		OnChanged: func(f float64) {
-			cameras[index].Quality = int(f)
-		},
 	}
 
 	qualityLabel := &widget.Label{
@@ -565,7 +570,7 @@ func genConfigContainer(cameraName string) *fyne.Container {
 
 	qualitySlider.OnChanged = func(f float64) {
 		qualityLabel.SetText(fmt.Sprintf("Quality (%v)", int(f)))
-		cameras[index].FPS = int(f)
+		cameras[index].Quality = int(f)
 	}
 
 	//. Create port entry
