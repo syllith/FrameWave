@@ -547,8 +547,7 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	cameras[len(cameras)-1].Port = portLabel.Text
 	cameras[len(cameras)-1].Enabled = enabledCheck.Checked
 
-	// Return the VBox containing all these widgets for this camera.
-	return container.NewPadded(
+	return container.NewCenter(
 		container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 150},
 			&widget.Label{Text: "Enabled"},
 			enabledCheck,
