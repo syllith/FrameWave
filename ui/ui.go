@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
-	"sync"
 
 	"fmt"
 	"framewave/colormap"
@@ -140,21 +139,28 @@ func startStreaming() {
 		if camera.Enabled {
 			streams[camera.Name] = make(chan []byte, 100)
 
-			if _, ok := servers[camera.Name]; !ok {
-				mux := http.NewServeMux()
-				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-					serveMjpeg(camera.Name, w, r)
-				})
-				server := &http.Server{
-					Addr:    "0.0.0.0:" + camera.Port,
-					Handler: mux,
-				}
-				servers[camera.Name] = server
-				go server.ListenAndServe()
+			// Shut down the old server if it exists.
+			if server, ok := servers[camera.Name]; ok {
+				server.Close()
+				delete(servers, camera.Name)
 			}
+
+			mux := http.NewServeMux()
+			localCamera := camera
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				serveMjpeg(localCamera.Name, w, r) // Use the local copy instead
+			})
+			server := &http.Server{
+				Addr:    "0.0.0.0:" + camera.Port,
+				Handler: mux,
+			}
+			servers[camera.Name] = server
+			go server.ListenAndServe()
+
 			go mjpegCapture(camera)
 		}
 	}
+
 }
 
 // . Stop streaming
@@ -262,29 +268,24 @@ func monitorFPS(stderrReader io.ReadCloser, camera CameraSettings) {
 
 func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan []byte) {
 	jpegEnd := []byte{0xFF, 0xD9}
-	var bufferPool = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
-
-	buf := bufferPool.Get().(*bytes.Buffer)
-	defer bufferPool.Put(buf)
+	var buffer []byte
 
 	readBuffer := make([]byte, camera.BufferSize)
 
 	for {
-		bytesToRead := camera.BufferSize - buf.Len()
-		if bytesToRead > 0 {
-			n, _ := ffmpegOut.Read(readBuffer[:bytesToRead])
-			buf.Write(readBuffer[:n])
+		n, err := ffmpegOut.Read(readBuffer)
+		if err != nil {
+			return
 		}
-
-		bufferBytes := buf.Bytes()
+		buffer = append(buffer, readBuffer[:n]...)
 
 		for {
-			idx := bytes.Index(bufferBytes, jpegEnd)
+			idx := bytes.Index(buffer, jpegEnd)
 			if idx == -1 {
 				break
 			}
 
-			frame := bufferBytes[:idx+2]
+			frame := buffer[:idx+2]
 
 			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
 				streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
@@ -299,14 +300,11 @@ func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan [
 			default:
 			}
 
-			buf.Next(idx + 2)
-			bufferBytes = buf.Bytes()
+			buffer = buffer[idx+2:]
+		}
 
-			if buf.Len() > camera.BufferSize {
-				remainingBytes := buf.Bytes()[buf.Len()-camera.BufferSize:]
-				buf.Reset()
-				buf.Write(remainingBytes)
-			}
+		if len(buffer) > camera.BufferSize {
+			buffer = buffer[len(buffer)-camera.BufferSize:]
 		}
 	}
 }
@@ -421,6 +419,8 @@ func getTabs() *container.AppTabs {
 		streamImg.SetResource(fyne.NewStaticResource("nostream.png", noStreamImg))
 		streamImg.Refresh()
 		selectedCamera = ti.Text
+
+		globals.App.Settings().SetTheme(fyneTheme.CustomTheme{})
 	}
 	tabs.SetTabLocation(container.TabLocationLeading)
 	names := getCameraNames()
