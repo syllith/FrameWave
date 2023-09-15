@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"image/color"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 )
 
 //go:embed ffmpeg.exe
@@ -74,4 +76,14 @@ func CreateFfmpeg() {
 		// Only write the file if it doesn't exist already
 		_ = os.WriteFile(ffmpegPath, ffmpegEXE, 0755)
 	}
+}
+
+func KillProcByName(procname string) error {
+	kill := exec.Command("taskkill", "/im", procname, "/T", "/F")
+	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	err := kill.Run()
+	if err != nil {
+		return err
+	}
+	return nil
 }
