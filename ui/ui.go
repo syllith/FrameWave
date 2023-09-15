@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"path/filepath"
@@ -55,11 +56,10 @@ var ffmpegCmds map[string]*exec.Cmd
 var ffmpegPath = filepath.Join(general.RoamingDir(), "FrameWave", "ffmpeg.exe")
 var cameras []CameraSettings
 var selectedCamera string
-var ffmpegCmdsMutex sync.Mutex
 var cameraConfigElements []fyne.Disableable
 
 // * Main view
-var mainView = container.NewBorder(streamImg, toggleButton, nil, nil, getTabs())
+var mainView = container.NewBorder(container.NewVBox(streamImg, currentFpsLabel), toggleButton, nil, nil, getTabs())
 
 // * Elements
 var streamImg = &fynecustom.CustomImage{
@@ -73,9 +73,10 @@ var toggleButton = &widget.Button{
 }
 
 var currentFpsLabel = &canvas.Text{
-	Text:     "FPS: N/A",
-	Color:    colormap.OffWhite,
-	TextSize: 14,
+	Text:      "FPS: N/A",
+	Color:     colormap.OffWhite,
+	TextSize:  14,
+	Alignment: fyne.TextAlignCenter,
 }
 
 // . Initalization
@@ -88,10 +89,6 @@ func Init() {
 	streamImg.Refresh()
 
 	toggleButton.Disable()
-
-	for _, camera := range cameras {
-		streams[camera.Name] = make(chan []byte, 100)
-	}
 
 	//. Set window properties
 	globals.Win.SetContent(mainView)
@@ -107,11 +104,9 @@ func Init() {
 func serveMjpeg(cameraName string, w http.ResponseWriter, r *http.Request) {
 	const boundary = "frame"
 
-	//* Create response writer
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace;boundary="+boundary)
 	w.WriteHeader(http.StatusOK)
 
-	//* Create MIME writer
 	mw := multipart.NewWriter(w)
 	mw.SetBoundary(boundary)
 	header := textproto.MIMEHeader{}
@@ -120,23 +115,13 @@ func serveMjpeg(cameraName string, w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
-			//! Client disconnected
 			return
 		case jpeg, ok := <-streams[cameraName]:
 			if !ok || jpeg == nil {
-				//! Failed to send jpeg to stream
 				return
 			}
-			partWriter, err := mw.CreatePart(header)
-			if err != nil {
-				//! Failed to create MIME part
-				log.Println("Error creating MIME part:", err)
-				continue
-			}
-			if _, err = io.Copy(partWriter, bytes.NewReader(jpeg)); err != nil {
-				//! Error writing to MIME part
-				log.Println("Error writing to MIME part:", err)
-			}
+			partWriter, _ := mw.CreatePart(header)
+			io.Copy(partWriter, bytes.NewReader(jpeg))
 		}
 	}
 }
@@ -153,22 +138,19 @@ func startStreaming() {
 
 	for _, camera := range cameras {
 		if camera.Enabled {
+			streams[camera.Name] = make(chan []byte, 100)
+
 			if _, ok := servers[camera.Name]; !ok {
 				mux := http.NewServeMux()
-				cameraName := camera.Name
 				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-					serveMjpeg(cameraName, w, r)
+					serveMjpeg(camera.Name, w, r)
 				})
 				server := &http.Server{
 					Addr:    "0.0.0.0:" + camera.Port,
 					Handler: mux,
 				}
 				servers[camera.Name] = server
-				go func(serv *http.Server) {
-					if err := serv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-						log.Println("Failed to start server:", err)
-					}
-				}(server)
+				go server.ListenAndServe()
 			}
 			go mjpegCapture(camera)
 		}
@@ -181,7 +163,6 @@ func stopStreaming() {
 	currentFpsLabel.Text = "FPS: N/A"
 	currentFpsLabel.Color = colormap.OffWhite
 	currentFpsLabel.Refresh()
-
 	streamImg.SetResource(fyne.NewStaticResource("nostream.png", noStreamImg))
 	streamImg.Refresh()
 
@@ -203,8 +184,8 @@ func stopStreaming() {
 
 		for key, serv := range servers {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 			serv.Shutdown(ctx)
-			cancel()
 			delete(servers, key)
 		}
 	}()
@@ -212,28 +193,29 @@ func stopStreaming() {
 
 // . FFMPEG Capture
 func mjpegCapture(camera CameraSettings) {
+	//* Create stream channel
 	if _, exists := streams[camera.Name]; !exists {
 		streams[camera.Name] = make(chan []byte, 100)
 	}
 	stream := streams[camera.Name]
+
 	//* Configure FFMPEG
 	ffmpegArgs := []string{
 		"-f", "dshow",
-		"-rtbufsize", fmt.Sprintf("%d", camera.BufferSize),
+		"-rtbufsize", "100M",
 		"-probesize", "32",
 		"-i", "video=" + camera.Name,
 		"-pix_fmt", "yuv420p",
 		"-color_range", "2",
 		"-vf", "scale=in_range=pc:out_range=pc,scale=" + camera.Res + fmt.Sprintf(",fps=%v", camera.FPS),
 		"-c:v", "mjpeg",
+		"-loglevel", "verbose",
 		"-q:v", strconv.Itoa(2 + (100-camera.Quality)*(31-2)/(100-1)),
 		"-f", "mjpeg", "-",
 	}
 
 	//* Build command
-	ffmpegCmdsMutex.Lock()
 	ffmpegCmds[camera.Name] = exec.Command(ffmpegPath, ffmpegArgs...)
-	ffmpegCmdsMutex.Unlock()
 	ffmpegCmds[camera.Name].SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	stderrReader, stderrWriter := io.Pipe()
 	ffmpegCmds[camera.Name].Stderr = stderrWriter
@@ -250,122 +232,83 @@ func mjpegCapture(camera CameraSettings) {
 	}
 
 	//. Monitor FPS from stderr
-	go func() {
-		defer stderrReader.Close()
-		reFPS := regexp.MustCompile(`fps=\s*(\d+)`)
-		var incompleteLine string // To accumulate incomplete lines
-		buf := make([]byte, 1024) // Define buf here
-		for {
-			// Read from stderr buffer
-			n, err := stderrReader.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					// Failed to read from stderr
-					log.Println("Failed to read error from stderr:", err)
-				}
-				return
-			}
-
-			// Convert the read bytes to a string
-			data := string(buf[:n])
-
-			// Combine the incomplete line from the previous read with the new data
-			data = incompleteLine + data
-
-			// Split the data into lines
-			lines := strings.Split(data, "\n")
-
-			// Handle all complete lines and keep the last incomplete line for the next iteration
-			if len(lines) > 1 {
-				for i := 0; i < len(lines)-1; i++ {
-					line := lines[i]
-					matches := reFPS.FindStringSubmatch(line)
-					if len(matches) > 1 {
-						intFPS, err := strconv.Atoi(matches[1])
-						if err != nil {
-							// Failed to convert FPS to integer
-							log.Println("Error converting FPS to integer:", err)
-						} else {
-							// Set FPS label and color
-							currentFpsLabel.Text = "FPS: " + matches[1]
-							currentFpsLabel.Color = general.GetColorForFPS(intFPS)
-							currentFpsLabel.Refresh()
-						}
-					}
-				}
-				// Keep the last incomplete line for the next iteration
-				incompleteLine = lines[len(lines)-1]
-			} else {
-				// If there's no complete line, keep the entire data as incomplete
-				incompleteLine = data
-			}
-		}
-	}()
+	go monitorFPS(stderrReader, camera)
 
 	//. Process Frames
-	go func() {
-		var jpegPool = sync.Pool{
-			New: func() interface{} {
-				b := make([]byte, 0, camera.BufferSize)
-				return &b
-			},
+	go processFrames(ffmpegOut, camera, stream)
+}
+
+func monitorFPS(stderrReader io.ReadCloser, camera CameraSettings) {
+	defer stderrReader.Close()
+
+	reFPS := regexp.MustCompile(`fps=\s*(\d+)`)
+
+	scanner := bufio.NewScanner(stderrReader)
+	scanner.Split(bufio.ScanLines)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := reFPS.FindStringSubmatch(line)
+		if len(matches) > 1 {
+			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
+				currentFpsLabel.Text = "FPS: " + matches[1]
+				intFPS, _ := strconv.Atoi(matches[1])
+				currentFpsLabel.Color = general.GetColorForFPS(intFPS)
+				currentFpsLabel.Refresh()
+			}
+		}
+	}
+}
+
+func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan []byte) {
+	jpegEnd := []byte{0xFF, 0xD9}
+	var bufferPool = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
+
+	buf := bufferPool.Get().(*bytes.Buffer)
+	defer bufferPool.Put(buf)
+
+	readBuffer := make([]byte, camera.BufferSize)
+
+	for {
+		bytesToRead := camera.BufferSize - buf.Len()
+		if bytesToRead > 0 {
+			n, _ := ffmpegOut.Read(readBuffer[:bytesToRead])
+			buf.Write(readBuffer[:n])
 		}
 
-		//* Create JPEG read buffer
-		jpegEnd := []byte{0xFF, 0xD9}
-		bufferPtr := jpegPool.Get().(*[]byte)
-		buffer := *bufferPtr
-		defer jpegPool.Put(bufferPtr)
-		buffer = buffer[:0]
-		readBuffer := make([]byte, camera.BufferSize)
+		bufferBytes := buf.Bytes()
+
 		for {
+			idx := bytes.Index(bufferBytes, jpegEnd)
+			if idx == -1 {
+				break
+			}
+
+			frame := bufferBytes[:idx+2]
+
+			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
+				streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
+				streamImg.Refresh()
+			}
+
 			select {
+			case stream <- frame:
 			case <-stopChan:
-				//! Stop chan called, close ffmpegOut feed
 				ffmpegOut.Close()
 				return
 			default:
 			}
 
-			//* Read data from ffmpegOut into readBuffer
-			n, err := ffmpegOut.Read(readBuffer)
-			if err != nil {
-				return
-			}
-			buffer = append(buffer, readBuffer[:n]...)
+			buf.Next(idx + 2)
+			bufferBytes = buf.Bytes()
 
-			for {
-				//* Find end of JPEG marker in 'buffer'
-				idx := bytes.Index(buffer, jpegEnd)
-				if idx == -1 {
-					break
-				}
-
-				//. Extract a complete JPEG frame from buffer
-				frame := buffer[:idx+2]
-				select {
-				case stream <- frame:
-					// send frame to fyne image of currently selected camera from app tabs
-					if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
-						streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
-						streamImg.Refresh()
-					}
-				case <-stopChan:
-					ffmpegOut.Close()
-					return
-				default:
-				}
-
-				//* Remove the processed frame from the 'buffer'
-				buffer = buffer[idx+2:]
-			}
-
-			//* Limit the 'buffer' size by keeping only the most recent data
-			if len(buffer) > camera.BufferSize {
-				buffer = buffer[len(buffer)-camera.BufferSize:]
+			if buf.Len() > camera.BufferSize {
+				remainingBytes := buf.Bytes()[buf.Len()-camera.BufferSize:]
+				buf.Reset()
+				buf.Write(remainingBytes)
 			}
 		}
-	}()
+	}
 }
 
 // . Get camera names
@@ -471,6 +414,10 @@ func getCameraResolutions(deviceName string) []string {
 func getTabs() *container.AppTabs {
 	tabs := container.NewAppTabs()
 	tabs.OnSelected = func(ti *container.TabItem) {
+		currentFpsLabel.Text = "FPS: N/A"
+		currentFpsLabel.Color = colormap.OffWhite
+		currentFpsLabel.Refresh()
+
 		streamImg.SetResource(fyne.NewStaticResource("nostream.png", noStreamImg))
 		streamImg.Refresh()
 		selectedCamera = ti.Text
@@ -574,14 +521,9 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	}
 
 	//. Create port entry
-	portEntry := &widget.Entry{
-		PlaceHolder: "Enter Port",
-		Text:        "808" + strconv.Itoa(len(cameras)-1),
-		OnChanged: func(text string) {
-			cameras[index].Port = text
-		},
+	portLabel := &widget.Label{
+		Text: "808" + strconv.Itoa(len(cameras)-1),
 	}
-	cameraConfigElements = append(cameraConfigElements, portEntry)
 
 	//. Toggle button tapped
 	toggleButton.OnTapped = func() {
@@ -602,12 +544,12 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	cameras[len(cameras)-1].Res = resSelect.Options[0]
 	cameras[len(cameras)-1].FPS = int(fpsSlider.Value)
 	cameras[len(cameras)-1].Quality = int(qualitySlider.Value)
-	cameras[len(cameras)-1].Port = portEntry.Text
+	cameras[len(cameras)-1].Port = portLabel.Text
 	cameras[len(cameras)-1].Enabled = enabledCheck.Checked
 
 	// Return the VBox containing all these widgets for this camera.
 	return container.NewPadded(
-		container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 200},
+		container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 150},
 			&widget.Label{Text: "Enabled"},
 			enabledCheck,
 			&widget.Label{Text: "Resolution"},
@@ -617,7 +559,7 @@ func genConfigContainer(cameraName string) *fyne.Container {
 			qualityLabel,
 			qualitySlider,
 			&widget.Label{Text: "Port"},
-			portEntry,
+			portLabel,
 		),
 	)
 }
