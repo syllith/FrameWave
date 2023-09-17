@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 //go:embed ffmpeg.exe
@@ -75,6 +76,7 @@ func CreateFfmpeg() {
 	if _, err := os.Stat(ffmpegPath); os.IsNotExist(err) {
 		// Only write the file if it doesn't exist already
 		_ = os.WriteFile(ffmpegPath, ffmpegEXE, 0755)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"sync"
 
 	"fmt"
 	"framewave/colormap"
@@ -17,6 +18,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -56,9 +58,10 @@ var ffmpegPath = filepath.Join(general.RoamingDir(), "FrameWave", "ffmpeg.exe")
 var cameras []CameraSettings
 var selectedCamera string
 var cameraConfigElements []fyne.Disableable
+var ffmpegCmdsMutex sync.Mutex
 
 // * Main view
-var mainView = container.NewBorder(container.NewVBox(streamImg, currentFpsLabel), toggleButton, nil, nil, getTabs())
+var mainView = container.NewBorder(container.NewVBox(streamImg, currentFpsLabel), container.NewVBox(toggleButton, openStreamButton), nil, nil, getTabs())
 
 // * Elements
 var streamImg = &fynecustom.CustomImage{
@@ -78,6 +81,31 @@ var currentFpsLabel = &canvas.Text{
 	Alignment: fyne.TextAlignCenter,
 }
 
+// . Add a new button for opening the stream URL
+var openStreamButton = &widget.Button{
+	Text: "Open Stream URL",
+	OnTapped: func() {
+		// Find the camera settings for the selected camera
+		var selectedCameraSettings CameraSettings
+		for _, camera := range cameras {
+			if camera.Name == selectedCamera {
+				selectedCameraSettings = camera
+				break
+			}
+		}
+
+		// Check if a stream channel exists for the selected camera
+		if _, streamRunning := streams[selectedCamera]; streamRunning {
+			// Construct the stream URL using the selected camera's port
+			url, _ := url.Parse("http://127.0.0.1:" + selectedCameraSettings.Port)
+			globals.App.OpenURL(url)
+		} else {
+			// Stream is not running for the selected camera, handle accordingly (e.g., show a message)
+			fmt.Println("No stream running for the selected camera.")
+		}
+	},
+}
+
 // . Initalization
 func Init() {
 	streams = make(map[string]chan []byte)
@@ -88,6 +116,7 @@ func Init() {
 	streamImg.Refresh()
 
 	toggleButton.Disable()
+	openStreamButton.Disable()
 
 	//. Set window properties
 	globals.Win.SetContent(mainView)
@@ -161,6 +190,10 @@ func startStreaming() {
 		}
 	}
 
+	// Enable the "Open Stream URL" button for the selected camera
+	if _, streamRunning := streams[selectedCamera]; streamRunning {
+		openStreamButton.Enable()
+	}
 }
 
 // . Stop streaming
@@ -171,6 +204,7 @@ func stopStreaming() {
 	currentFpsLabel.Refresh()
 	streamImg.SetResource(fyne.NewStaticResource("nostream.png", noStreamImg))
 	streamImg.Refresh()
+	openStreamButton.Disable()
 
 	for _, elem := range cameraConfigElements {
 		elem.Enable()
@@ -221,7 +255,9 @@ func mjpegCapture(camera CameraSettings) {
 	}
 
 	//* Build command
+	ffmpegCmdsMutex.Lock()
 	ffmpegCmds[camera.Name] = exec.Command(ffmpegPath, ffmpegArgs...)
+	ffmpegCmdsMutex.Unlock()
 	ffmpegCmds[camera.Name].SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	stderrReader, stderrWriter := io.Pipe()
 	ffmpegCmds[camera.Name].Stderr = stderrWriter
@@ -232,10 +268,13 @@ func mjpegCapture(camera CameraSettings) {
 	}
 
 	//* Start FFMPEG for the specific camera
+	ffmpegCmdsMutex.Lock()
 	if err := ffmpegCmds[camera.Name].Start(); err != nil {
 		log.Println("Failed to start FFMPEG for", camera.Name, ":", err)
+		ffmpegCmdsMutex.Unlock()
 		return
 	}
+	ffmpegCmdsMutex.Unlock()
 
 	//. Monitor FPS from stderr
 	go monitorFPS(stderrReader, camera)
@@ -418,7 +457,14 @@ func getTabs() *container.AppTabs {
 
 		streamImg.SetResource(fyne.NewStaticResource("nostream.png", noStreamImg))
 		streamImg.Refresh()
-		selectedCamera = ti.Text
+		selectedCamera = ti.Text // Set the selected camera
+
+		// Enable the "Open Stream URL" button if the selected camera is running
+		if _, streamRunning := streams[selectedCamera]; streamRunning {
+			openStreamButton.Enable()
+		} else {
+			openStreamButton.Disable()
+		}
 
 		globals.App.Settings().SetTheme(fyneTheme.CustomTheme{})
 	}
@@ -428,6 +474,11 @@ func getTabs() *container.AppTabs {
 	for _, name := range names {
 		cameras = append(cameras, CameraSettings{Name: name})
 		tabs.Append(container.NewTabItem(name, genConfigContainer(name)))
+	}
+
+	// Set the selected camera to the first camera initially
+	if len(cameras) > 0 {
+		selectedCamera = cameras[0].Name
 	}
 
 	return tabs
