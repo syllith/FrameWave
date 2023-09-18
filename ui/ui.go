@@ -48,6 +48,10 @@ type CameraSettings struct {
 	Enabled    bool
 	BufferSize int
 	MaxFPS     int
+	Brightness int
+	Contrast   int // Add contrast field
+	Saturation int // Add saturation field
+	Sharpness  int // Add sharpness field
 }
 
 var streams map[string]chan []byte
@@ -57,7 +61,6 @@ var ffmpegCmds map[string]*exec.Cmd
 var ffmpegPath = filepath.Join(general.RoamingDir(), "FrameWave", "ffmpeg.exe")
 var cameras []CameraSettings
 var selectedCamera string
-var cameraConfigElements []fyne.Disableable
 var ffmpegCmdsMutex sync.Mutex
 
 // * Main view
@@ -160,10 +163,6 @@ func startStreaming() {
 	stopChan = make(chan bool)
 	general.KillProcByName("ffmpeg.exe")
 
-	for _, elem := range cameraConfigElements {
-		elem.Disable()
-	}
-
 	for _, camera := range cameras {
 		if camera.Enabled {
 			streams[camera.Name] = make(chan []byte, 100)
@@ -197,6 +196,7 @@ func startStreaming() {
 }
 
 // . Stop streaming
+// Stop streaming
 func stopStreaming() {
 	toggleButton.SetText("Start")
 	currentFpsLabel.Text = "FPS: N/A"
@@ -206,14 +206,16 @@ func stopStreaming() {
 	streamImg.Refresh()
 	openStreamButton.Disable()
 
-	for _, elem := range cameraConfigElements {
-		elem.Enable()
-	}
+	// Create a new stop channel and close the old one if it exists
+	newStopChan := make(chan bool)
+	oldStopChan := stopChan
+	stopChan = newStopChan
 
 	go func() {
-		stopChan <- true
-		close(stopChan)
-		stopChan = nil
+		// Close the old stop channel outside of this goroutine
+		if oldStopChan != nil {
+			close(oldStopChan)
+		}
 
 		for _, cmd := range ffmpegCmds {
 			if cmd.Process != nil {
@@ -247,7 +249,8 @@ func mjpegCapture(camera CameraSettings) {
 		"-i", "video=" + camera.Name,
 		"-pix_fmt", "yuv420p",
 		"-color_range", "2",
-		"-vf", "scale=in_range=pc:out_range=pc,scale=" + camera.Res + fmt.Sprintf(",fps=%v", camera.FPS),
+		"-vf", fmt.Sprintf("scale=in_range=pc:out_range=pc,scale=%s,fps=%v,eq=brightness=%.2f:contrast=%.2f:saturation=%.2f,unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount=%.2f", camera.Res, camera.FPS, (float64(camera.Brightness)-50.0)/50.0, float64(camera.Contrast)/50.0, float64(camera.Saturation)/50.0, (float64(camera.Sharpness)-50.0)/50.0),
+		"-c:v", "mjpeg",
 		"-c:v", "mjpeg",
 		"-loglevel", "verbose",
 		"-q:v", strconv.Itoa(2 + (100-camera.Quality)*(31-2)/(100-1)),
@@ -293,6 +296,7 @@ func monitorFPS(stderrReader io.ReadCloser, camera CameraSettings) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		fmt.Println(line)
 		matches := reFPS.FindStringSubmatch(line)
 		if len(matches) > 1 {
 			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
@@ -511,9 +515,14 @@ func genConfigContainer(cameraName string) *fyne.Container {
 			} else {
 				toggleButton.Disable()
 			}
+
+			if toggleButton.Text == "Stop" {
+				stopStreaming()
+				startStreaming()
+			}
+
 		},
 	}
-	cameraConfigElements = append(cameraConfigElements, enabledCheck)
 
 	//. Create resolution drop down
 	resSelect := &widget.Select{
@@ -531,9 +540,103 @@ func genConfigContainer(cameraName string) *fyne.Container {
 			uncompressedSize := width * height * 24 / 8
 			estimatedJPEGSize := uncompressedSize / 10
 			cameras[index].BufferSize = estimatedJPEGSize + int(0.3*float64(estimatedJPEGSize))
+
+			if toggleButton.Text == "Stop" {
+				stopStreaming()
+				startStreaming()
+			}
 		},
 	}
-	cameraConfigElements = append(cameraConfigElements, resSelect)
+
+	contrastSlider := &widget.Slider{
+		Min:   0,
+		Max:   100,
+		Value: 50,
+	}
+
+	saturationSlider := &widget.Slider{
+		Min:   0,
+		Max:   100,
+		Value: 50,
+	}
+
+	sharpnessSlider := &widget.Slider{
+		Min:   0,
+		Max:   100,
+		Value: 50,
+	}
+
+	brightnessSlider := &widget.Slider{
+		Min:   0,
+		Max:   100,
+		Value: 50,
+	}
+
+	contrastLabel := &widget.Label{
+		Text: fmt.Sprintf("Contrast (%v)", int(contrastSlider.Value)),
+	}
+
+	saturationLabel := &widget.Label{
+		Text: fmt.Sprintf("Saturation (%v)", int(saturationSlider.Value)),
+	}
+
+	sharpnessLabel := &widget.Label{
+		Text: fmt.Sprintf("Sharpness (%v)", int(sharpnessSlider.Value)),
+	}
+
+	// Update the labels and fields for contrast, saturation, and sharpness
+	contrastSlider.OnChanged = func(c float64) {
+		contrastLabel.SetText(fmt.Sprintf("Contrast (%v)", int(c)))
+		cameras[index].Contrast = int(c)
+	}
+
+	saturationSlider.OnChanged = func(s float64) {
+		saturationLabel.SetText(fmt.Sprintf("Saturation (%v)", int(s)))
+		cameras[index].Saturation = int(s)
+	}
+
+	sharpnessSlider.OnChanged = func(sh float64) {
+		sharpnessLabel.SetText(fmt.Sprintf("Sharpness (%v)", int(sh)))
+		cameras[index].Sharpness = int(sh)
+	}
+
+	contrastSlider.OnChangeEnded = func(c float64) {
+		if toggleButton.Text == "Stop" {
+			stopStreaming()
+			startStreaming()
+		}
+	}
+
+	saturationSlider.OnChangeEnded = func(s float64) {
+		if toggleButton.Text == "Stop" {
+			stopStreaming()
+			startStreaming()
+		}
+	}
+
+	sharpnessSlider.OnChangeEnded = func(sh float64) {
+		if toggleButton.Text == "Stop" {
+			stopStreaming()
+			startStreaming()
+		}
+	}
+
+	brightnessLabel := &widget.Label{
+		Text: fmt.Sprintf("Brightness (%v)", int(brightnessSlider.Value)),
+	}
+
+	brightnessSlider.OnChanged = func(b float64) {
+		brightnessLabel.SetText(fmt.Sprintf("Brightness (%v)", int(b)))
+		cameras[index].Brightness = int(b)
+	}
+
+	// restart the stream when the brightness is changed
+	brightnessSlider.OnChangeEnded = func(b float64) {
+		if toggleButton.Text == "Stop" {
+			stopStreaming()
+			startStreaming()
+		}
+	}
 
 	//. Set default resolutions
 	resSelect.SetSelected(resSelect.Options[0])
@@ -555,6 +658,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 		cameras[index].FPS = int(f)
 	}
 
+	fpsSlider.OnChangeEnded = func(f float64) {
+		if toggleButton.Text == "Stop" {
+			stopStreaming()
+			startStreaming()
+		}
+	}
+
 	//. Create quality slider
 	qualitySlider := &widget.Slider{
 		Min:   1,
@@ -569,6 +679,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	qualitySlider.OnChanged = func(f float64) {
 		qualityLabel.SetText(fmt.Sprintf("Quality (%v)", int(f)))
 		cameras[index].Quality = int(f)
+	}
+
+	qualitySlider.OnChangeEnded = func(f float64) {
+		if toggleButton.Text == "Stop" {
+			stopStreaming()
+			startStreaming()
+		}
 	}
 
 	//. Create port entry
@@ -597,6 +714,10 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	cameras[len(cameras)-1].Quality = int(qualitySlider.Value)
 	cameras[len(cameras)-1].Port = portLabel.Text
 	cameras[len(cameras)-1].Enabled = enabledCheck.Checked
+	cameras[len(cameras)-1].Contrast = int(contrastSlider.Value)
+	cameras[len(cameras)-1].Brightness = int(brightnessSlider.Value)
+	cameras[len(cameras)-1].Saturation = int(saturationSlider.Value)
+	cameras[len(cameras)-1].Sharpness = int(sharpnessSlider.Value)
 
 	return container.NewCenter(
 		container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 150},
@@ -610,6 +731,16 @@ func genConfigContainer(cameraName string) *fyne.Container {
 			qualitySlider,
 			&widget.Label{Text: "Port"},
 			portLabel,
+			&widget.Label{Text: ""},
+			&widget.Label{Text: ""},
+			brightnessLabel,
+			brightnessSlider,
+			contrastLabel,
+			contrastSlider,
+			saturationLabel,
+			saturationSlider,
+			sharpnessLabel,
+			sharpnessSlider,
 		),
 	)
 }
