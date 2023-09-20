@@ -49,9 +49,9 @@ type CameraSettings struct {
 	BufferSize int
 	MaxFPS     int
 	Brightness int
-	Contrast   int // Add contrast field
-	Saturation int // Add saturation field
-	Sharpness  int // Add sharpness field
+	Contrast   int
+	Saturation int
+	Sharpness  int
 }
 
 var streams map[string]chan []byte
@@ -129,6 +129,14 @@ func Init() {
 	globals.Win.SetTitle("FrameWave v" + globals.Version)
 	globals.Win.SetContent(mainView)
 	globals.App.Settings().SetTheme(fyneTheme.CustomTheme{})
+
+	toggleButton.OnTapped = func() {
+		if toggleButton.Text == "Start" {
+			startStreaming()
+		} else {
+			stopStreaming()
+		}
+	}
 }
 
 // . Server MJPEG stream
@@ -251,7 +259,6 @@ func mjpegCapture(camera CameraSettings) {
 		"-color_range", "2",
 		"-vf", fmt.Sprintf("scale=in_range=pc:out_range=pc,scale=%s,fps=%v,eq=brightness=%.2f:contrast=%.2f:saturation=%.2f,unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount=%.2f", camera.Res, camera.FPS, (float64(camera.Brightness)-50.0)/50.0, float64(camera.Contrast)/50.0, float64(camera.Saturation)/50.0, (float64(camera.Sharpness)-50.0)/50.0),
 		"-c:v", "mjpeg",
-		"-c:v", "mjpeg",
 		"-loglevel", "verbose",
 		"-q:v", strconv.Itoa(2 + (100-camera.Quality)*(31-2)/(100-1)),
 		"-f", "mjpeg", "-",
@@ -296,7 +303,6 @@ func monitorFPS(stderrReader io.ReadCloser, camera CameraSettings) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Println(line)
 		matches := reFPS.FindStringSubmatch(line)
 		if len(matches) > 1 {
 			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
@@ -311,17 +317,19 @@ func monitorFPS(stderrReader io.ReadCloser, camera CameraSettings) {
 
 func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan []byte) {
 	jpegEnd := []byte{0xFF, 0xD9}
+	reader := bufio.NewReader(ffmpegOut)
 	var buffer []byte
-
-	readBuffer := make([]byte, camera.BufferSize)
+	chunk := make([]byte, camera.BufferSize)
 
 	for {
-		n, err := ffmpegOut.Read(readBuffer)
+		//* Read bytes chunk by chunk
+		n, err := reader.Read(chunk)
 		if err != nil {
 			return
 		}
-		buffer = append(buffer, readBuffer[:n]...)
+		buffer = append(buffer, chunk[:n]...)
 
+		//* Check if we have a valid JPEG frame in the buffer
 		for {
 			idx := bytes.Index(buffer, jpegEnd)
 			if idx == -1 {
@@ -329,6 +337,7 @@ func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan [
 			}
 
 			frame := buffer[:idx+2]
+			buffer = buffer[idx+2:]
 
 			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
 				streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
@@ -342,15 +351,58 @@ func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan [
 				return
 			default:
 			}
-
-			buffer = buffer[idx+2:]
-		}
-
-		if len(buffer) > camera.BufferSize {
-			buffer = buffer[len(buffer)-camera.BufferSize:]
 		}
 	}
 }
+
+// func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan []byte) {
+// 	jpegEnd := []byte{0xFF, 0xD9}
+// 	var buffer []byte
+
+// 	readBuffer := make([]byte, camera.BufferSize)
+
+// 	for {
+// 		startTime := time.Now() // Record the start time before processing each frame
+
+// 		n, err := ffmpegOut.Read(readBuffer)
+// 		if err != nil {
+// 			return
+// 		}
+// 		buffer = append(buffer, readBuffer[:n]...)
+
+// 		for {
+// 			idx := bytes.Index(buffer, jpegEnd)
+// 			if idx == -1 {
+// 				break
+// 			}
+
+// 			frame := buffer[:idx+2]
+
+// 			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
+// 				streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
+// 				streamImg.Refresh()
+// 			}
+
+// 			select {
+// 			case stream <- frame:
+// 			case <-stopChan:
+// 				ffmpegOut.Close()
+// 				return
+// 			default:
+// 			}
+
+// 			buffer = buffer[idx+2:]
+// 		}
+
+// 		if len(buffer) > camera.BufferSize {
+// 			buffer = buffer[len(buffer)-camera.BufferSize:]
+// 		}
+
+// 		endTime := time.Now()                                   // Record the end time after processing each frame
+// 		processingTime := endTime.Sub(startTime).Milliseconds() // Calculate the processing time in milliseconds
+// 		log.Printf("Frame processing time: %d ms", processingTime)
+// 	}
+// }
 
 // . Get camera names
 func getCameraNames() []string {
@@ -554,8 +606,8 @@ func genConfigContainer(cameraName string) *fyne.Container {
 			height, _ := strconv.Atoi(matches[2])
 
 			uncompressedSize := width * height * 24 / 8
-			estimatedJPEGSize := uncompressedSize / 10
-			cameras[index].BufferSize = estimatedJPEGSize + int(0.3*float64(estimatedJPEGSize))
+			estimatedJPEGSize := uncompressedSize / 20 // Using 5% of uncompressed size
+			cameras[index].BufferSize = estimatedJPEGSize + int(0.2*float64(estimatedJPEGSize))
 
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
