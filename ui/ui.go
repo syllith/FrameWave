@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -41,7 +43,7 @@ var noStreamImg []byte
 // * Backend
 type CameraSettings struct {
 	Name       string
-	Res        string
+	Resolution string
 	FPS        int
 	Quality    int
 	Port       string
@@ -204,7 +206,6 @@ func startStreaming() {
 }
 
 // . Stop streaming
-// Stop streaming
 func stopStreaming() {
 	toggleButton.SetText("Start")
 	currentFpsLabel.Text = "FPS: N/A"
@@ -257,7 +258,7 @@ func mjpegCapture(camera CameraSettings) {
 		"-i", "video=" + camera.Name,
 		"-pix_fmt", "yuv420p",
 		"-color_range", "2",
-		"-vf", fmt.Sprintf("scale=in_range=pc:out_range=pc,scale=%s,fps=%v,eq=brightness=%.2f:contrast=%.2f:saturation=%.2f,unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount=%.2f", camera.Res, camera.FPS, (float64(camera.Brightness)-50.0)/50.0, float64(camera.Contrast)/50.0, float64(camera.Saturation)/50.0, (float64(camera.Sharpness)-50.0)/50.0),
+		"-vf", fmt.Sprintf("scale=in_range=pc:out_range=pc,scale=%s,fps=%v,eq=brightness=%.2f:contrast=%.2f:saturation=%.2f,unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount=%.2f", camera.Resolution, camera.FPS, (float64(camera.Brightness)-50.0)/50.0, float64(camera.Contrast)/50.0, float64(camera.Saturation)/50.0, (float64(camera.Sharpness)-50.0)/50.0),
 		"-c:v", "mjpeg",
 		"-loglevel", "verbose",
 		"-q:v", strconv.Itoa(2 + (100-camera.Quality)*(31-2)/(100-1)),
@@ -354,55 +355,6 @@ func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan [
 		}
 	}
 }
-
-// func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan []byte) {
-// 	jpegEnd := []byte{0xFF, 0xD9}
-// 	var buffer []byte
-
-// 	readBuffer := make([]byte, camera.BufferSize)
-
-// 	for {
-// 		startTime := time.Now() // Record the start time before processing each frame
-
-// 		n, err := ffmpegOut.Read(readBuffer)
-// 		if err != nil {
-// 			return
-// 		}
-// 		buffer = append(buffer, readBuffer[:n]...)
-
-// 		for {
-// 			idx := bytes.Index(buffer, jpegEnd)
-// 			if idx == -1 {
-// 				break
-// 			}
-
-// 			frame := buffer[:idx+2]
-
-// 			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
-// 				streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
-// 				streamImg.Refresh()
-// 			}
-
-// 			select {
-// 			case stream <- frame:
-// 			case <-stopChan:
-// 				ffmpegOut.Close()
-// 				return
-// 			default:
-// 			}
-
-// 			buffer = buffer[idx+2:]
-// 		}
-
-// 		if len(buffer) > camera.BufferSize {
-// 			buffer = buffer[len(buffer)-camera.BufferSize:]
-// 		}
-
-// 		endTime := time.Now()                                   // Record the end time after processing each frame
-// 		processingTime := endTime.Sub(startTime).Milliseconds() // Calculate the processing time in milliseconds
-// 		log.Printf("Frame processing time: %d ms", processingTime)
-// 	}
-// }
 
 // . Get camera names
 func getCameraNames() []string {
@@ -532,7 +484,6 @@ func genTabs() *container.AppTabs {
 		tabs.Append(container.NewTabItem(name, genConfigContainer(name)))
 	}
 
-	// Set the selected camera to the first camera initially
 	if len(cameras) > 0 {
 		selectedCamera = cameras[0].Name
 	}
@@ -550,26 +501,53 @@ func genConfigContainer(cameraName string) *fyne.Container {
 		}
 	}
 
+	settingsMap := loadSettings()
+
+	// Initialize variables to hold default values
+	var enabledDefault bool
+	var resolutionDefault string
+	var fpsDefault float64 = 30
+	var qualityDefault float64 = 100
+	var brightnessDefault float64 = 50
+	var contrastDefault float64 = 50
+	var saturationDefault float64 = 50
+	var sharpnessDefault float64 = 50
+
+	// If settings for the camera exist, overwrite default values
+	if camSettings, exists := settingsMap[cameraName]; exists {
+		enabledDefault = camSettings.Enabled
+		resolutionDefault = camSettings.Resolution
+		fpsDefault = float64(camSettings.FPS)
+		qualityDefault = float64(camSettings.Quality)
+		brightnessDefault = float64(camSettings.Brightness)
+		contrastDefault = float64(camSettings.Contrast)
+		saturationDefault = float64(camSettings.Saturation)
+		sharpnessDefault = float64(camSettings.Sharpness)
+	}
+
 	var enabledCheck *widget.Check
 	var resSelect *widget.Select
-	var fpsLabel = widget.NewLabel(fmt.Sprintf("FPS (%v)", cameras[index].MaxFPS))
+	var fpsLabel = widget.NewLabel(fmt.Sprintf("FPS (%v)", fpsDefault))
 	var fpsSlider *widget.Slider
-	var qualityLabel = widget.NewLabel("Quality (100)")
+	var qualityLabel = widget.NewLabel(fmt.Sprintf("Quality (%v)", qualityDefault))
 	var qualitySlider *widget.Slider
 	var portLabel = widget.NewLabel("808" + strconv.Itoa(index))
-	var brightnessLabel = widget.NewLabel("Brightness (50)")
+	var brightnessLabel = widget.NewLabel(fmt.Sprintf("Brightness (%v)", brightnessDefault))
 	var brightnessSlider *widget.Slider
-	var contrastLabel *widget.Label = widget.NewLabel("Contrast (50)")
+	var contrastLabel *widget.Label = widget.NewLabel(fmt.Sprintf("Contrast (%v)", contrastDefault))
 	var contrastSlider *widget.Slider
-	var saturationLabel = widget.NewLabel("Saturation (50)")
+	var saturationLabel = widget.NewLabel(fmt.Sprintf("Saturation (%v)", saturationDefault))
 	var saturationSlider *widget.Slider
-	var sharpnessLabel = widget.NewLabel("Sharpness (50)")
+	var sharpnessLabel = widget.NewLabel(fmt.Sprintf("Sharpness (%v)", sharpnessDefault))
 	var sharpnessSlider *widget.Slider
 
 	//. Enabled checkbox
 	enabledCheck = &widget.Check{
+		Checked: enabledDefault,
 		OnChanged: func(checked bool) {
 			cameras[index].Enabled = checked
+			saveSettings(cameraName)
+
 			anyCameraEnabled := false
 			for _, cam := range cameras {
 				if cam.Enabled {
@@ -588,7 +566,6 @@ func genConfigContainer(cameraName string) *fyne.Container {
 				stopStreaming()
 				startStreaming()
 			}
-
 		},
 	}
 
@@ -596,8 +573,9 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	resSelect = &widget.Select{
 		PlaceHolder: "Resolution",
 		Options:     getCameraResolutions(cameraName),
+		Selected:    resolutionDefault,
 		OnChanged: func(selected string) {
-			cameras[index].Res = selected
+			cameras[index].Resolution = selected
 
 			re := regexp.MustCompile(`(\d+)x(\d+)`)
 			matches := re.FindStringSubmatch(selected)
@@ -606,8 +584,9 @@ func genConfigContainer(cameraName string) *fyne.Container {
 			height, _ := strconv.Atoi(matches[2])
 
 			uncompressedSize := width * height * 24 / 8
-			estimatedJPEGSize := uncompressedSize / 20 // Using 5% of uncompressed size
+			estimatedJPEGSize := uncompressedSize / 20
 			cameras[index].BufferSize = estimatedJPEGSize + int(0.2*float64(estimatedJPEGSize))
+			saveSettings(cameraName)
 
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
@@ -620,12 +599,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	fpsSlider = &widget.Slider{
 		Min:   2,
 		Max:   30,
-		Value: 30,
+		Value: fpsDefault,
 		OnChanged: func(f float64) {
 			fpsLabel.SetText(fmt.Sprintf("FPS (%v)", int(f)))
 		},
 		OnChangeEnded: func(f float64) {
 			cameras[index].FPS = int(f)
+			saveSettings(cameraName)
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
 				startStreaming()
@@ -637,12 +617,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	qualitySlider = &widget.Slider{
 		Min:   1,
 		Max:   100,
-		Value: 100,
+		Value: qualityDefault,
 		OnChanged: func(q float64) {
 			qualityLabel.SetText(fmt.Sprintf("Quality (%v)", int(q)))
 		},
 		OnChangeEnded: func(q float64) {
 			cameras[index].Quality = int(q)
+			saveSettings(cameraName)
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
 				startStreaming()
@@ -654,12 +635,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	brightnessSlider = &widget.Slider{
 		Min:   0,
 		Max:   100,
-		Value: 50,
+		Value: brightnessDefault,
 		OnChanged: func(b float64) {
 			brightnessLabel.SetText(fmt.Sprintf("Brightness (%v)", int(b)))
 		},
 		OnChangeEnded: func(b float64) {
 			cameras[index].Brightness = int(b)
+			saveSettings(cameraName)
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
 				startStreaming()
@@ -671,12 +653,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	contrastSlider = &widget.Slider{
 		Min:   0,
 		Max:   100,
-		Value: 50,
+		Value: contrastDefault,
 		OnChanged: func(c float64) {
 			contrastLabel.SetText(fmt.Sprintf("Contrast (%v)", int(c)))
 		},
 		OnChangeEnded: func(c float64) {
 			cameras[index].Contrast = int(c)
+			saveSettings(cameraName)
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
 				startStreaming()
@@ -688,12 +671,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	saturationSlider = &widget.Slider{
 		Min:   0,
 		Max:   100,
-		Value: 50,
+		Value: saturationDefault,
 		OnChanged: func(s float64) {
 			saturationLabel.SetText(fmt.Sprintf("Saturation (%v)", int(s)))
 		},
 		OnChangeEnded: func(s float64) {
 			cameras[index].Saturation = int(s)
+			saveSettings(cameraName)
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
 				startStreaming()
@@ -705,12 +689,13 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	sharpnessSlider = &widget.Slider{
 		Min:   0,
 		Max:   100,
-		Value: 50,
+		Value: sharpnessDefault,
 		OnChanged: func(sh float64) {
 			sharpnessLabel.SetText(fmt.Sprintf("Sharpness (%v)", int(sh)))
 		},
 		OnChangeEnded: func(sh float64) {
 			cameras[index].Sharpness = int(sh)
+			saveSettings(cameraName)
 			if toggleButton.Text == "Stop" {
 				stopStreaming()
 				startStreaming()
@@ -719,10 +704,12 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	}
 
 	//. Set default resolutions
-	resSelect.SetSelected(resSelect.Options[0])
+	if resSelect.Selected == "" && len(resSelect.Options) > 0 {
+		resSelect.SetSelected(resSelect.Options[0])
+	}
 
 	//. Set default camera setting
-	cameras[len(cameras)-1].Res = resSelect.Options[0]
+	cameras[len(cameras)-1].Resolution = resSelect.Options[0]
 	cameras[len(cameras)-1].FPS = int(fpsSlider.Value)
 	cameras[len(cameras)-1].Quality = int(qualitySlider.Value)
 	cameras[len(cameras)-1].Port = portLabel.Text
@@ -754,4 +741,52 @@ func genConfigContainer(cameraName string) *fyne.Container {
 			portLabel,
 		),
 	)
+}
+
+func saveSettings(updatedCameraName string) {
+	// Load existing settings first
+	settingsMap := loadSettings()
+
+	// Update the specific camera settings in the settingsMap
+	for _, cam := range cameras {
+		if cam.Name == updatedCameraName {
+			settingsMap[updatedCameraName] = cam
+			break
+		}
+	}
+
+	// Save updated settings
+	var updatedCameras []CameraSettings
+	for _, cam := range settingsMap {
+		updatedCameras = append(updatedCameras, cam)
+	}
+	data, err := json.Marshal(updatedCameras)
+	if err != nil {
+		fmt.Println("Error saving settings:", err)
+		return
+	}
+	err = os.WriteFile("settings.json", data, 0644)
+	if err != nil {
+		fmt.Println("Error saving settings:", err)
+	}
+}
+
+func loadSettings() map[string]CameraSettings {
+	var loadedCameras []CameraSettings
+	data, err := os.ReadFile("settings.json")
+	if err != nil {
+		fmt.Println("Error loading settings:", err)
+		return nil
+	}
+	err = json.Unmarshal(data, &loadedCameras)
+	if err != nil {
+		fmt.Println("Error loading settings:", err)
+		return nil
+	}
+
+	settingsMap := make(map[string]CameraSettings)
+	for _, cam := range loadedCameras {
+		settingsMap[cam.Name] = cam
+	}
+	return settingsMap
 }
