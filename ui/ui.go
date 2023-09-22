@@ -34,6 +34,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -48,7 +49,6 @@ type CameraSettings struct {
 	Quality    int
 	Port       string
 	Enabled    bool
-	BufferSize int
 	MaxFPS     int
 	Brightness int
 	Contrast   int
@@ -64,9 +64,7 @@ var ffmpegPath = filepath.Join(general.RoamingDir(), "FrameWave", "ffmpeg.exe")
 var cameras []CameraSettings
 var selectedCamera string
 var ffmpegCmdsMutex sync.Mutex
-
-// * Main view
-var mainView = container.NewBorder(container.NewVBox(streamImg, currentFpsLabel), container.NewVBox(toggleButton, openStreamButton), nil, nil, genTabs())
+var allowSaving = false
 
 // * Elements
 var streamImg = &fynecustom.CustomImage{
@@ -78,6 +76,26 @@ var streamImg = &fynecustom.CustomImage{
 var toggleButton = &widget.Button{
 	Text: "Start",
 }
+
+var usernameEntry = &widget.Entry{
+	PlaceHolder: "Username",
+}
+
+var passwordEntry = &widget.Entry{
+	PlaceHolder: "Password",
+}
+
+var authForm = container.NewStack(
+	container.New(layout.NewFormLayout(),
+		&widget.Label{Text: "Username"},
+		usernameEntry,
+		&widget.Label{Text: "Password"},
+		passwordEntry,
+	),
+)
+
+// * Main view
+var mainView = container.NewBorder(container.NewVBox(streamImg, currentFpsLabel), container.NewVBox(authForm, toggleButton, openStreamButton), nil, nil, genTabs())
 
 var currentFpsLabel = &canvas.Text{
 	Text:      "FPS: N/A",
@@ -120,7 +138,7 @@ func Init() {
 	streamImg.SetResource(fyne.NewStaticResource("nostream.png", noStreamImg))
 	streamImg.Refresh()
 
-	toggleButton.Disable()
+	//. Disable "Open Stream URL" button
 	openStreamButton.Disable()
 
 	//. Set window properties
@@ -132,6 +150,19 @@ func Init() {
 	globals.Win.SetContent(mainView)
 	globals.App.Settings().SetTheme(fyneTheme.CustomTheme{})
 
+	//. Disable toggle button if no cameras are enabled
+	anyCameraEnabled := false
+	for _, cam := range cameras {
+		if cam.Enabled {
+			anyCameraEnabled = true
+			break
+		}
+	}
+	if !anyCameraEnabled {
+		toggleButton.Disable()
+	}
+
+	//. Set toggle button action
 	toggleButton.OnTapped = func() {
 		if toggleButton.Text == "Start" {
 			startStreaming()
@@ -167,6 +198,23 @@ func serveMjpeg(cameraName string, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func basicAuthMiddleware(username, password string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if username == "" {
+			next(w, r)
+			return
+		}
+
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != username || pass != password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // . Start streaming
 func startStreaming() {
 	toggleButton.SetText("Stop")
@@ -185,9 +233,9 @@ func startStreaming() {
 
 			mux := http.NewServeMux()
 			localCamera := camera
-			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("/", basicAuthMiddleware(usernameEntry.Text, passwordEntry.Text, func(w http.ResponseWriter, r *http.Request) {
 				serveMjpeg(localCamera.Name, w, r) // Use the local copy instead
-			})
+			}))
 			server := &http.Server{
 				Addr:    "0.0.0.0:" + camera.Port,
 				Handler: mux,
@@ -320,7 +368,7 @@ func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan [
 	jpegEnd := []byte{0xFF, 0xD9}
 	reader := bufio.NewReader(ffmpegOut)
 	var buffer []byte
-	chunk := make([]byte, camera.BufferSize)
+	chunk := make([]byte, calculateBufferSize(camera.Resolution))
 
 	for {
 		//* Read bytes chunk by chunk
@@ -354,6 +402,20 @@ func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan [
 			}
 		}
 	}
+}
+
+func calculateBufferSize(resolution string) int {
+	re := regexp.MustCompile(`(\d+)x(\d+)`)
+	matches := re.FindStringSubmatch(resolution)
+	if len(matches) < 3 {
+		return 0
+	}
+
+	width, _ := strconv.Atoi(matches[1])
+	height, _ := strconv.Atoi(matches[2])
+	uncompressedSize := width * height * 24 / 8
+	estimatedJPEGSize := uncompressedSize / 20
+	return estimatedJPEGSize + int(0.2*float64(estimatedJPEGSize))
 }
 
 // . Get camera names
@@ -484,6 +546,8 @@ func genTabs() *container.AppTabs {
 		tabs.Append(container.NewTabItem(name, genConfigContainer(name)))
 	}
 
+	allowSaving = true
+
 	if len(cameras) > 0 {
 		selectedCamera = cameras[0].Name
 	}
@@ -576,16 +640,6 @@ func genConfigContainer(cameraName string) *fyne.Container {
 		Selected:    resolutionDefault,
 		OnChanged: func(selected string) {
 			cameras[index].Resolution = selected
-
-			re := regexp.MustCompile(`(\d+)x(\d+)`)
-			matches := re.FindStringSubmatch(selected)
-
-			width, _ := strconv.Atoi(matches[1])
-			height, _ := strconv.Atoi(matches[2])
-
-			uncompressedSize := width * height * 24 / 8
-			estimatedJPEGSize := uncompressedSize / 20
-			cameras[index].BufferSize = estimatedJPEGSize + int(0.2*float64(estimatedJPEGSize))
 			saveSettings(cameraName)
 
 			if toggleButton.Text == "Stop" {
@@ -743,45 +797,15 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	)
 }
 
-func saveSettings(updatedCameraName string) {
-	// Load existing settings first
-	settingsMap := loadSettings()
-
-	// Update the specific camera settings in the settingsMap
-	for _, cam := range cameras {
-		if cam.Name == updatedCameraName {
-			settingsMap[updatedCameraName] = cam
-			break
-		}
-	}
-
-	// Save updated settings
-	var updatedCameras []CameraSettings
-	for _, cam := range settingsMap {
-		updatedCameras = append(updatedCameras, cam)
-	}
-	data, err := json.Marshal(updatedCameras)
-	if err != nil {
-		fmt.Println("Error saving settings:", err)
-		return
-	}
-	err = os.WriteFile("settings.json", data, 0644)
-	if err != nil {
-		fmt.Println("Error saving settings:", err)
-	}
-}
-
 func loadSettings() map[string]CameraSettings {
 	var loadedCameras []CameraSettings
-	data, err := os.ReadFile("settings.json")
+	data, err := os.ReadFile(general.RoamingDir() + "/FrameWave/settings.json")
 	if err != nil {
-		fmt.Println("Error loading settings:", err)
-		return nil
+		return make(map[string]CameraSettings)
 	}
 	err = json.Unmarshal(data, &loadedCameras)
 	if err != nil {
-		fmt.Println("Error loading settings:", err)
-		return nil
+		return make(map[string]CameraSettings)
 	}
 
 	settingsMap := make(map[string]CameraSettings)
@@ -789,4 +813,33 @@ func loadSettings() map[string]CameraSettings {
 		settingsMap[cam.Name] = cam
 	}
 	return settingsMap
+}
+
+func saveSettings(updatedCameraName string) {
+	if !allowSaving {
+		return
+	}
+
+	settingsMap := loadSettings()
+	if settingsMap == nil {
+		settingsMap = make(map[string]CameraSettings)
+	}
+
+	for _, cam := range cameras {
+		if cam.Name == updatedCameraName {
+			settingsMap[updatedCameraName] = cam
+			break
+		}
+	}
+
+	var updatedCameras []CameraSettings
+	for _, cam := range settingsMap {
+		updatedCameras = append(updatedCameras, cam)
+	}
+
+	data, err := json.MarshalIndent(updatedCameras, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(general.RoamingDir()+"/FrameWave/settings.json", data, 0644)
 }
