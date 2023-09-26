@@ -34,7 +34,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -85,8 +84,19 @@ var passwordEntry = &widget.Entry{
 	PlaceHolder: "Password",
 }
 
-var authForm = container.NewStack(
-	container.New(layout.NewFormLayout(),
+var previewCheckbox = &widget.Check{
+	Checked: true,
+	Text:    "Enable Preview",
+	OnChanged: func(checked bool) {
+		if !checked {
+			streamImg.SetResource(fyne.NewStaticResource("nostream.png", noStreamImg))
+			streamImg.Refresh()
+		}
+	},
+}
+
+var authForm = container.NewCenter(
+	container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 200},
 		&widget.Label{Text: "Username"},
 		usernameEntry,
 		&widget.Label{Text: "Password"},
@@ -95,7 +105,21 @@ var authForm = container.NewStack(
 )
 
 // * Main view
-var mainView = container.NewBorder(container.NewVBox(streamImg, currentFpsLabel), container.NewVBox(authForm, toggleButton, openStreamButton), nil, nil, genTabs())
+var mainView = container.NewBorder(
+	container.NewVBox(
+		streamImg,
+		currentFpsLabel,
+		container.NewCenter(previewCheckbox),
+		&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1}),
+	container.NewVBox(
+		&canvas.Line{StrokeColor: colormap.Gray, StrokeWidth: 1},
+		authForm,
+		toggleButton,
+		openStreamButton),
+	nil,
+	nil,
+	genTabs(),
+)
 
 var currentFpsLabel = &canvas.Text{
 	Text:      "FPS: N/A",
@@ -223,7 +247,7 @@ func startStreaming() {
 
 	for _, camera := range cameras {
 		if camera.Enabled {
-			streams[camera.Name] = make(chan []byte, 100)
+			streams[camera.Name] = make(chan []byte, 30)
 
 			// Shut down the old server if it exists.
 			if server, ok := servers[camera.Name]; ok {
@@ -342,6 +366,50 @@ func mjpegCapture(camera CameraSettings) {
 	go processFrames(ffmpegOut, camera, stream)
 }
 
+func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan []byte) {
+	jpegEnd := []byte{0xFF, 0xD9}
+	var buffer []byte
+	var bufferSize = calculateBufferSize(camera.Resolution) * 5
+
+	readBuffer := make([]byte, bufferSize)
+
+	for {
+		n, err := ffmpegOut.Read(readBuffer)
+		if err != nil {
+			return
+		}
+		buffer = append(buffer, readBuffer[:n]...)
+
+		for {
+			idx := bytes.Index(buffer, jpegEnd)
+			if idx == -1 {
+				break
+			}
+
+			frame := buffer[:idx+2]
+
+			if selectedCamera == camera.Name && toggleButton.Text == "Stop" && previewCheckbox.Checked {
+				streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
+				streamImg.Refresh()
+			}
+
+			select {
+			case stream <- frame:
+			case <-stopChan:
+				ffmpegOut.Close()
+				return
+			default:
+			}
+
+			buffer = buffer[idx+2:]
+		}
+
+		if len(buffer) > bufferSize {
+			buffer = buffer[len(buffer)-bufferSize:]
+		}
+	}
+}
+
 func monitorFPS(stderrReader io.ReadCloser, camera CameraSettings) {
 	defer stderrReader.Close()
 
@@ -359,46 +427,6 @@ func monitorFPS(stderrReader io.ReadCloser, camera CameraSettings) {
 				intFPS, _ := strconv.Atoi(matches[1])
 				currentFpsLabel.Color = general.GetColorForFPS(intFPS)
 				currentFpsLabel.Refresh()
-			}
-		}
-	}
-}
-
-func processFrames(ffmpegOut io.ReadCloser, camera CameraSettings, stream chan []byte) {
-	jpegEnd := []byte{0xFF, 0xD9}
-	reader := bufio.NewReader(ffmpegOut)
-	var buffer []byte
-	chunk := make([]byte, calculateBufferSize(camera.Resolution))
-
-	for {
-		//* Read bytes chunk by chunk
-		n, err := reader.Read(chunk)
-		if err != nil {
-			return
-		}
-		buffer = append(buffer, chunk[:n]...)
-
-		//* Check if we have a valid JPEG frame in the buffer
-		for {
-			idx := bytes.Index(buffer, jpegEnd)
-			if idx == -1 {
-				break
-			}
-
-			frame := buffer[:idx+2]
-			buffer = buffer[idx+2:]
-
-			if selectedCamera == camera.Name && toggleButton.Text == "Stop" {
-				streamImg.SetResource(fyne.NewStaticResource("frame.jpeg", frame))
-				streamImg.Refresh()
-			}
-
-			select {
-			case stream <- frame:
-			case <-stopChan:
-				ffmpegOut.Close()
-				return
-			default:
 			}
 		}
 	}
@@ -774,25 +802,29 @@ func genConfigContainer(cameraName string) *fyne.Container {
 	cameras[len(cameras)-1].Sharpness = int(sharpnessSlider.Value)
 
 	return container.NewCenter(
-		container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 150},
-			&widget.Label{Text: "Enabled"},
-			enabledCheck,
-			&widget.Label{Text: "Resolution"},
-			resSelect,
-			fpsLabel,
-			fpsSlider,
-			qualityLabel,
-			qualitySlider,
-			brightnessLabel,
-			brightnessSlider,
-			contrastLabel,
-			contrastSlider,
-			saturationLabel,
-			saturationSlider,
-			sharpnessLabel,
-			sharpnessSlider,
-			&widget.Label{Text: "Port"},
-			portLabel,
+		container.NewHBox(
+			container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 125},
+				&widget.Label{Text: "Enabled"},
+				enabledCheck,
+				&widget.Label{Text: "Resolution"},
+				resSelect,
+				fpsLabel,
+				fpsSlider,
+				qualityLabel,
+				qualitySlider,
+				&widget.Label{Text: "Port"},
+				portLabel,
+			),
+			container.New(&fynecustom.MinWidthFormLayout{MinColWidth: 125},
+				brightnessLabel,
+				brightnessSlider,
+				contrastLabel,
+				contrastSlider,
+				saturationLabel,
+				saturationSlider,
+				sharpnessLabel,
+				sharpnessSlider,
+			),
 		),
 	)
 }
